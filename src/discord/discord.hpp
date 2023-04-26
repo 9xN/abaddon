@@ -3,6 +3,7 @@
 #include "httpclient.hpp"
 #include "objects.hpp"
 #include "store.hpp"
+#include "chatsubmitparams.hpp"
 #include <sigc++/sigc++.h>
 #include <nlohmann/json.hpp>
 #include <thread>
@@ -55,10 +56,13 @@ public:
 
     std::unordered_set<Snowflake> GetGuilds() const;
     const UserData &GetUserData() const;
+    const UserGuildSettingsData &GetUserGuildSettings() const;
+    std::optional<UserGuildSettingsEntry> GetSettingsForGuild(Snowflake id) const;
     std::vector<Snowflake> GetUserSortedGuilds() const;
     std::vector<Message> GetMessagesForChannel(Snowflake id, size_t limit = 50) const;
     std::vector<Message> GetMessagesBefore(Snowflake channel_id, Snowflake message_id, size_t limit = 50) const;
     std::set<Snowflake> GetPrivateChannels() const;
+    const UserSettings &GetUserSettings() const;
 
     EPremiumType GetSelfPremiumType() const;
 
@@ -96,27 +100,27 @@ public:
     bool IsThreadJoined(Snowflake thread_id) const;
     bool HasGuildPermission(Snowflake user_id, Snowflake guild_id, Permission perm) const;
 
+    bool HasSelfChannelPermission(Snowflake channel_id, Permission perm) const;
     bool HasAnyChannelPermission(Snowflake user_id, Snowflake channel_id, Permission perm) const;
     bool HasChannelPermission(Snowflake user_id, Snowflake channel_id, Permission perm) const;
     Permission ComputePermissions(Snowflake member_id, Snowflake guild_id) const;
     Permission ComputeOverwrites(Permission base, Snowflake member_id, Snowflake channel_id) const;
     bool CanManageMember(Snowflake guild_id, Snowflake actor, Snowflake target) const; // kick, ban, edit nickname (cant think of a better name)
 
-    void ChatMessageCallback(const std::string &nonce, const http::response_type &response);
+    void ChatMessageCallback(const std::string &nonce, const http::response_type &response, const sigc::slot<void(DiscordError code)> &callback);
+    void SendChatMessageNoAttachments(const ChatSubmitParams &params, const sigc::slot<void(DiscordError code)> &callback);
+    void SendChatMessageAttachments(const ChatSubmitParams &params, const sigc::slot<void(DiscordError code)> &callback);
 
-    void SendChatMessage(const std::string &content, Snowflake channel);
-    void SendChatMessage(const std::string &content, Snowflake channel, Snowflake referenced_message);
+    void SendChatMessage(const ChatSubmitParams &params, const sigc::slot<void(DiscordError code)> &callback);
     void DeleteMessage(Snowflake channel_id, Snowflake id);
     void EditMessage(Snowflake channel_id, Snowflake id, std::string content);
     void SendLazyLoad(Snowflake id);
     void SendThreadLazyLoad(Snowflake id);
-    void JoinGuild(const std::string &code);
     void LeaveGuild(Snowflake id);
     void KickUser(Snowflake user_id, Snowflake guild_id);
     void BanUser(Snowflake user_id, Snowflake guild_id); // todo: reason, delete messages
     void UpdateStatus(PresenceStatus status, bool is_afk);
     void UpdateStatus(PresenceStatus status, bool is_afk, const ActivityData &obj);
-    void CreateDM(Snowflake user_id, const sigc::slot<void(DiscordError code, Snowflake channel_id)> &callback);
     void CloseDM(Snowflake channel_id);
     std::optional<Snowflake> FindDM(Snowflake user_id); // wont find group dms
     void AddReaction(Snowflake id, Glib::ustring param);
@@ -202,8 +206,15 @@ public:
     void GetVerificationGateInfo(Snowflake guild_id, const sigc::slot<void(std::optional<VerificationGateInfoObject>)> &callback);
     void AcceptVerificationGate(Snowflake guild_id, VerificationGateInfoObject info, const sigc::slot<void(DiscordError code)> &callback);
 
+    void SetReferringChannel(Snowflake id);
+
+    void SetBuildNumber(uint32_t build_number);
+    void SetCookie(std::string_view cookie);
+
     void UpdateToken(const std::string &token);
     void SetUserAgent(const std::string &agent);
+
+    void SetDumpReady(bool dump);
 
     bool IsChannelMuted(Snowflake id) const noexcept;
     bool IsGuildMuted(Snowflake id) const noexcept;
@@ -222,6 +233,8 @@ private:
     std::vector<uint8_t> m_compressed_buf;
     std::vector<uint8_t> m_decompress_buf;
     z_stream m_zstream;
+
+    bool m_dump_ready = false;
 
     static std::string GetAPIURL();
     static std::string GetGatewayURL();
@@ -284,6 +297,9 @@ private:
     void SendIdentify();
     void SendResume();
 
+    void SetHeaders();
+    void SetSuperPropertiesFromIdentity(const IdentifyMessage &identity);
+
     void HandleSocketOpen();
     void HandleSocketClose(uint16_t code);
 
@@ -296,6 +312,8 @@ private:
     void HandleReadyGuildSettings(const ReadyEventData &data);
 
     std::string m_token;
+
+    uint32_t m_build_number = 142000;
 
     void AddUserToGuild(Snowflake user_id, Snowflake guild_id);
     std::map<Snowflake, std::set<Snowflake>> m_guild_to_users;
@@ -313,6 +331,7 @@ private:
 
     UserData m_user_data;
     UserSettings m_user_settings;
+    UserGuildSettingsData m_user_guild_settings;
 
     Store m_store;
     HTTPClient m_http;
@@ -342,6 +361,8 @@ private:
     mutable std::mutex m_generic_mutex;
     Glib::Dispatcher m_generic_dispatch;
     std::queue<std::function<void()>> m_generic_queue;
+
+    Glib::Timer m_progress_cb_timer;
 
     std::set<Snowflake> m_channels_pinned_requested;
     std::set<Snowflake> m_channels_lazy_loaded;
@@ -402,6 +423,7 @@ public:
     typedef sigc::signal<void, std::string /* nonce */, float /* retry_after */> type_signal_message_send_fail; // retry after param will be 0 if it failed for a reason that isnt slowmode
     typedef sigc::signal<void, bool, GatewayCloseCode> type_signal_disconnected;                                // bool true if reconnecting
     typedef sigc::signal<void> type_signal_connected;
+    typedef sigc::signal<void, std::string, float> type_signal_message_progress;
 
     type_signal_gateway_ready signal_gateway_ready();
     type_signal_message_create signal_message_create();
@@ -455,6 +477,7 @@ public:
     type_signal_message_send_fail signal_message_send_fail();
     type_signal_disconnected signal_disconnected();
     type_signal_connected signal_connected();
+    type_signal_message_progress signal_message_progress();
 
 protected:
     type_signal_gateway_ready m_signal_gateway_ready;
@@ -509,4 +532,5 @@ protected:
     type_signal_message_send_fail m_signal_message_send_fail;
     type_signal_disconnected m_signal_disconnected;
     type_signal_connected m_signal_connected;
+    type_signal_message_progress m_signal_message_progress;
 };

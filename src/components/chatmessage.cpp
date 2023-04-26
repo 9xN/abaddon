@@ -1,15 +1,8 @@
-#include "abaddon.hpp"
 #include "chatmessage.hpp"
+#include "constants.hpp"
 #include "lazyimage.hpp"
-#include "util.hpp"
+#include "misc/chatutil.hpp"
 #include <unordered_map>
-
-constexpr static int EmojiSize = 24; // settings eventually
-constexpr static int AvatarSize = 32;
-constexpr static int EmbedImageWidth = 400;
-constexpr static int EmbedImageHeight = 300;
-constexpr static int ThumbnailSize = 100;
-constexpr static int StickerComponentSize = 160;
 
 ChatMessageItemContainer::ChatMessageItemContainer()
     : m_main(Gtk::ORIENTATION_VERTICAL) {
@@ -32,7 +25,6 @@ ChatMessageItemContainer *ChatMessageItemContainer::FromMessage(const Message &d
 
     if (!data.Content.empty() || data.Type != MessageType::DEFAULT) {
         container->m_text_component = container->CreateTextComponent(data);
-        container->AttachEventHandlers(*container->m_text_component);
         container->m_main.add(*container->m_text_component);
     }
 
@@ -101,7 +93,6 @@ void ChatMessageItemContainer::UpdateContent() {
 
     if (!data->Embeds.empty()) {
         m_embed_component = CreateEmbedsComponent(data->Embeds);
-        AttachEventHandlers(*m_embed_component);
         m_main.add(*m_embed_component);
         m_embed_component->show_all();
     }
@@ -152,12 +143,12 @@ void ChatMessageItemContainer::UpdateAttributes() {
 
 void ChatMessageItemContainer::AddClickHandler(Gtk::Widget *widget, const std::string &url) {
     // clang-format off
-    widget->signal_button_press_event().connect([url](GdkEventButton *event) -> bool {
-        if (event->type == GDK_BUTTON_PRESS && event->button == GDK_BUTTON_PRIMARY) {
+    widget->signal_button_release_event().connect([url](GdkEventButton *event) -> bool {
+        if (event->type == GDK_BUTTON_RELEASE && event->button == GDK_BUTTON_PRIMARY) {
             LaunchBrowser(url);
-            return false;
+            return true;
         }
-        return true;
+        return false;
     }, false);
     // clang-format on
 }
@@ -168,11 +159,14 @@ Gtk::TextView *ChatMessageItemContainer::CreateTextComponent(const Message &data
     if (data.IsPending)
         tv->get_style_context()->add_class("pending");
     tv->get_style_context()->add_class("message-text");
-    tv->set_can_focus(false);
+    tv->set_can_focus(true);
+    tv->set_cursor_visible(false);
     tv->set_editable(false);
     tv->set_wrap_mode(Gtk::WRAP_WORD_CHAR);
     tv->set_halign(Gtk::ALIGN_FILL);
     tv->set_hexpand(true);
+
+    tv->signal_button_press_event().connect(sigc::mem_fun(*this, &ChatMessageItemContainer::OnTextViewButtonPress), false);
 
     UpdateTextComponent(tv);
 
@@ -191,11 +185,11 @@ void ChatMessageItemContainer::UpdateTextComponent(Gtk::TextView *tv) {
         case MessageType::DEFAULT:
         case MessageType::INLINE_REPLY:
             b->insert(s, data->Content);
-            HandleRoleMentions(b);
-            HandleUserMentions(b);
+            ChatUtil::HandleRoleMentions(b);
+            ChatUtil::HandleUserMentions(b, ChannelID, false);
             HandleLinks(*tv);
             HandleChannelMentions(tv);
-            HandleEmojis(*tv);
+            ChatUtil::HandleEmojis(*tv);
             break;
         case MessageType::USER_PREMIUM_GUILD_SUBSCRIPTION:
             b->insert_markup(s, "<span color='#999999'><i>[boosted server]</i></span>");
@@ -217,10 +211,10 @@ void ChatMessageItemContainer::UpdateTextComponent(Gtk::TextView *tv) {
                 }
             } else {
                 b->insert(s, data->Content);
-                HandleUserMentions(b);
+                ChatUtil::HandleUserMentions(b, ChannelID, false);
                 HandleLinks(*tv);
                 HandleChannelMentions(tv);
-                HandleEmojis(*tv);
+                ChatUtil::HandleEmojis(*tv);
             }
         } break;
         case MessageType::RECIPIENT_ADD: {
@@ -281,8 +275,6 @@ void ChatMessageItemContainer::UpdateTextComponent(Gtk::TextView *tv) {
                 tag->property_weight() = Pango::WEIGHT_BOLD;
                 m_channel_tagmap[tag] = *data->MessageReference->ChannelID;
                 b->insert_with_tag(iter, data->Content, tag);
-
-                tv->signal_button_press_event().connect(sigc::mem_fun(*this, &ChatMessageItemContainer::OnClickChannel), false);
             } else {
                 b->insert_markup(s, "<i><span color='#999999'>" + author->GetEscapedBoldName() + " started a thread: </span><b>" + Glib::Markup::escape_text(data->Content) + "</b></i>");
             }
@@ -297,12 +289,10 @@ Gtk::Widget *ChatMessageItemContainer::CreateEmbedsComponent(const std::vector<E
         if (IsEmbedImageOnly(embed)) {
             auto *widget = CreateImageComponent(*embed.Thumbnail->ProxyURL, *embed.Thumbnail->URL, *embed.Thumbnail->Width, *embed.Thumbnail->Height);
             widget->show();
-            AttachEventHandlers(*widget);
             box->add(*widget);
         } else {
             auto *widget = CreateEmbedComponent(embed);
             widget->show();
-            AttachEventHandlers(*widget);
             box->add(*widget);
         }
     }
@@ -339,6 +329,7 @@ Gtk::Widget *ChatMessageItemContainer::CreateEmbedComponent(const EmbedData &emb
             author_lbl->set_hexpand(false);
             author_lbl->set_text(*embed.Author->Name);
             author_lbl->get_style_context()->add_class("embed-author");
+            author_lbl->set_selectable(true);
             author_box->add(*author_lbl);
         }
     }
@@ -355,14 +346,15 @@ Gtk::Widget *ChatMessageItemContainer::CreateEmbedComponent(const EmbedData &emb
         title_label->set_line_wrap(true);
         title_label->set_line_wrap_mode(Pango::WRAP_WORD_CHAR);
         title_label->set_max_width_chars(50);
+        title_label->set_selectable(true);
         title_ev->add(*title_label);
         content->pack_start(*title_ev);
 
         if (embed.URL.has_value()) {
             AddPointerCursor(*title_ev);
             auto url = *embed.URL;
-            title_ev->signal_button_press_event().connect([url = std::move(url)](GdkEventButton *event) -> bool {
-                if (event->button == GDK_BUTTON_PRIMARY) {
+            title_ev->signal_button_release_event().connect([url = std::move(url)](GdkEventButton *event) -> bool {
+                if (event->type == GDK_BUTTON_RELEASE && event->button == GDK_BUTTON_PRIMARY) {
                     LaunchBrowser(url);
                     return true;
                 }
@@ -384,6 +376,7 @@ Gtk::Widget *ChatMessageItemContainer::CreateEmbedComponent(const EmbedData &emb
             desc_label->set_halign(Gtk::ALIGN_START);
             desc_label->set_hexpand(false);
             desc_label->get_style_context()->add_class("embed-description");
+            desc_label->set_selectable(true);
             content->pack_start(*desc_label);
         }
     }
@@ -426,6 +419,8 @@ Gtk::Widget *ChatMessageItemContainer::CreateEmbedComponent(const EmbedData &emb
             field_box->pack_start(*field_val);
             field_lbl->get_style_context()->add_class("embed-field-title");
             field_val->get_style_context()->add_class("embed-field-value");
+            field_lbl->set_selectable(true);
+            field_val->set_selectable(true);
             flow->insert(*field_box, -1);
         }
     }
@@ -449,6 +444,7 @@ Gtk::Widget *ChatMessageItemContainer::CreateEmbedComponent(const EmbedData &emb
         footer_lbl->set_hexpand(false);
         footer_lbl->set_text(embed.Footer->Text);
         footer_lbl->get_style_context()->add_class("embed-footer");
+        footer_lbl->set_selectable(true);
         content->pack_start(*footer_lbl);
     }
 
@@ -493,11 +489,21 @@ Gtk::Widget *ChatMessageItemContainer::CreateImageComponent(const std::string &p
     Gtk::EventBox *ev = Gtk::manage(new Gtk::EventBox);
     Gtk::Image *widget = Gtk::manage(new LazyImage(proxy_url, w, h, false));
     ev->add(*widget);
+    ev->set_halign(Gtk::ALIGN_START);
     widget->set_halign(Gtk::ALIGN_START);
     widget->set_size_request(w, h);
 
-    AttachEventHandlers(*ev);
     AddClickHandler(ev, url);
+
+    const auto on_button_press_event = [this, url](GdkEventButton *e) -> bool {
+        if (e->type == GDK_BUTTON_PRESS && e->button == GDK_BUTTON_SECONDARY) {
+            m_selected_link = url;
+            m_link_menu.popup_at_pointer(reinterpret_cast<GdkEvent *>(e));
+            return true;
+        }
+        return false;
+    };
+    ev->signal_button_press_event().connect(on_button_press_event, false);
 
     return ev;
 }
@@ -510,8 +516,17 @@ Gtk::Widget *ChatMessageItemContainer::CreateAttachmentComponent(const Attachmen
     ev->get_style_context()->add_class("message-attachment-box");
     ev->add(*btn);
 
-    AttachEventHandlers(*ev);
     AddClickHandler(ev, data.URL);
+
+    const auto on_button_press_event = [this, url = data.URL](GdkEventButton *e) -> bool {
+        if (e->type == GDK_BUTTON_PRESS && e->button == GDK_BUTTON_SECONDARY) {
+            m_selected_link = url;
+            m_link_menu.popup_at_pointer(reinterpret_cast<GdkEvent *>(e));
+            return true;
+        }
+        return false;
+    };
+    ev->signal_button_press_event().connect(on_button_press_event, false);
 
     return ev;
 }
@@ -534,7 +549,6 @@ Gtk::Widget *ChatMessageItemContainer::CreateStickersComponent(const std::vector
 
     box->show();
 
-    AttachEventHandlers(*box);
     return box;
 }
 
@@ -641,13 +655,19 @@ Gtk::Widget *ChatMessageItemContainer::CreateReplyComponent(const Message &data)
                 const auto role = discord.GetRole(role_id);
                 if (role.has_value()) {
                     const auto author = discord.GetUser(author_id);
-                    return "<b><span color=\"#" + IntToCSSColor(role->Color) + "\">" + author->GetEscapedString() + "</span></b>";
+                    if (author.has_value()) {
+                        return "<b><span color=\"#" + IntToCSSColor(role->Color) + "\">" + author->GetEscapedString() + "</span></b>";
+                    }
                 }
             }
         }
 
         const auto author = discord.GetUser(author_id);
-        return author->GetEscapedBoldString<false>();
+        if (author.has_value()) {
+            return author->GetEscapedBoldString<false>();
+        }
+
+        return "<b>Unknown User</b>";
     };
 
     // if the message wasnt fetched from store it might have an un-fetched reference
@@ -659,15 +679,15 @@ Gtk::Widget *ChatMessageItemContainer::CreateReplyComponent(const Message &data)
     }
 
     if (data.Interaction.has_value()) {
-        const auto user = *discord.GetUser(data.Interaction->User.ID);
-
         if (data.GuildID.has_value()) {
-            lbl->set_markup(get_author_markup(user.ID, *data.GuildID) +
+            lbl->set_markup(get_author_markup(data.Interaction->User.ID, *data.GuildID) +
                             " used <span color='#697ec4'>/" +
                             Glib::Markup::escape_text(data.Interaction->Name) +
                             "</span>");
+        } else if (const auto user = discord.GetUser(data.Interaction->User.ID); user.has_value()) {
+            lbl->set_markup(user->GetEscapedBoldString<false>());
         } else {
-            lbl->set_markup(user.GetEscapedBoldString<false>());
+            lbl->set_markup("<b>Unknown User</b>");
         }
     } else if (referenced_message.has_value()) {
         if (referenced_message.value() == nullptr) {
@@ -686,8 +706,8 @@ Gtk::Widget *ChatMessageItemContainer::CreateReplyComponent(const Message &data)
                 Gtk::TextBuffer::iterator start, end;
                 buf->get_bounds(start, end);
                 buf->set_text(referenced.Content);
-                CleanupEmojis(buf);
-                HandleUserMentions(buf);
+                ChatUtil::CleanupEmojis(buf);
+                ChatUtil::HandleUserMentions(buf, ChannelID, false);
                 HandleChannelMentions(buf);
                 text = Glib::Markup::escape_text(buf->get_text());
             }
@@ -709,13 +729,6 @@ Gtk::Widget *ChatMessageItemContainer::CreateReplyComponent(const Message &data)
     return box;
 }
 
-Glib::ustring ChatMessageItemContainer::GetText(const Glib::RefPtr<Gtk::TextBuffer> &buf) {
-    Gtk::TextBuffer::iterator a, b;
-    buf->get_bounds(a, b);
-    auto slice = buf->get_slice(a, b, true);
-    return slice;
-}
-
 bool ChatMessageItemContainer::IsEmbedImageOnly(const EmbedData &data) {
     if (!data.Thumbnail.has_value()) return false;
     if (data.Author.has_value()) return false;
@@ -727,199 +740,10 @@ bool ChatMessageItemContainer::IsEmbedImageOnly(const EmbedData &data) {
     return data.Thumbnail->ProxyURL.has_value() && data.Thumbnail->URL.has_value() && data.Thumbnail->Width.has_value() && data.Thumbnail->Height.has_value();
 }
 
-void ChatMessageItemContainer::HandleRoleMentions(const Glib::RefPtr<Gtk::TextBuffer> &buf) {
-    constexpr static const auto mentions_regex = R"(<@&(\d+)>)";
-
-    static auto rgx = Glib::Regex::create(mentions_regex);
-
-    Glib::ustring text = GetText(buf);
-    const auto &discord = Abaddon::Get().GetDiscordClient();
-
-    int startpos = 0;
-    Glib::MatchInfo match;
-    while (rgx->match(text, startpos, match)) {
-        int mstart, mend;
-        if (!match.fetch_pos(0, mstart, mend)) break;
-        const Glib::ustring role_id = match.fetch(1);
-        const auto role = discord.GetRole(role_id);
-        if (!role.has_value()) {
-            startpos = mend;
-            continue;
-        }
-
-        Glib::ustring replacement;
-        if (role->HasColor()) {
-            replacement = "<b><span color=\"#" + IntToCSSColor(role->Color) + "\">@" + role->GetEscapedName() + "</span></b>";
-        } else {
-            replacement = "<b>@" + role->GetEscapedName() + "</b>";
-        }
-
-        const auto chars_start = g_utf8_pointer_to_offset(text.c_str(), text.c_str() + mstart);
-        const auto chars_end = g_utf8_pointer_to_offset(text.c_str(), text.c_str() + mend);
-        const auto start_it = buf->get_iter_at_offset(chars_start);
-        const auto end_it = buf->get_iter_at_offset(chars_end);
-
-        auto it = buf->erase(start_it, end_it);
-        buf->insert_markup(it, replacement);
-
-        text = GetText(buf);
-        startpos = 0;
-    }
-}
-
-void ChatMessageItemContainer::HandleUserMentions(const Glib::RefPtr<Gtk::TextBuffer> &buf) const {
-    constexpr static const auto mentions_regex = R"(<@!?(\d+)>)";
-
-    static auto rgx = Glib::Regex::create(mentions_regex);
-
-    Glib::ustring text = GetText(buf);
-    const auto &discord = Abaddon::Get().GetDiscordClient();
-
-    int startpos = 0;
-    Glib::MatchInfo match;
-    while (rgx->match(text, startpos, match)) {
-        int mstart, mend;
-        if (!match.fetch_pos(0, mstart, mend)) break;
-        const Glib::ustring user_id = match.fetch(1);
-        const auto user = discord.GetUser(user_id);
-        const auto channel = discord.GetChannel(ChannelID);
-        if (!user.has_value() || !channel.has_value()) {
-            startpos = mend;
-            continue;
-        }
-
-        Glib::ustring replacement;
-
-        if (channel->Type == ChannelType::DM || channel->Type == ChannelType::GROUP_DM)
-            replacement = user->GetEscapedBoldString<true>();
-        else {
-            const auto role_id = user->GetHoistedRole(*channel->GuildID, true);
-            const auto role = discord.GetRole(role_id);
-            if (!role.has_value())
-                replacement = user->GetEscapedBoldString<true>();
-            else
-                replacement = "<span color=\"#" + IntToCSSColor(role->Color) + "\">" + user->GetEscapedBoldString<true>() + "</span>";
-        }
-
-        // regex returns byte positions and theres no straightforward way in the c++ bindings to deal with that :(
-        const auto chars_start = g_utf8_pointer_to_offset(text.c_str(), text.c_str() + mstart);
-        const auto chars_end = g_utf8_pointer_to_offset(text.c_str(), text.c_str() + mend);
-        const auto start_it = buf->get_iter_at_offset(chars_start);
-        const auto end_it = buf->get_iter_at_offset(chars_end);
-
-        auto it = buf->erase(start_it, end_it);
-        buf->insert_markup(it, replacement);
-
-        text = GetText(buf);
-        startpos = 0;
-    }
-}
-
-void ChatMessageItemContainer::HandleStockEmojis(Gtk::TextView &tv) {
-    Abaddon::Get().GetEmojis().ReplaceEmojis(tv.get_buffer(), EmojiSize);
-}
-
-void ChatMessageItemContainer::HandleCustomEmojis(Gtk::TextView &tv) {
-    static auto rgx = Glib::Regex::create(R"(<a?:([\w\d_]+):(\d+)>)");
-
-    auto &img = Abaddon::Get().GetImageManager();
-
-    auto buf = tv.get_buffer();
-    auto text = GetText(buf);
-
-    Glib::MatchInfo match;
-    int startpos = 0;
-    while (rgx->match(text, startpos, match)) {
-        int mstart, mend;
-        if (!match.fetch_pos(0, mstart, mend)) break;
-        const bool is_animated = match.fetch(0)[1] == 'a';
-
-        const auto chars_start = g_utf8_pointer_to_offset(text.c_str(), text.c_str() + mstart);
-        const auto chars_end = g_utf8_pointer_to_offset(text.c_str(), text.c_str() + mend);
-        auto start_it = buf->get_iter_at_offset(chars_start);
-        auto end_it = buf->get_iter_at_offset(chars_end);
-
-        startpos = mend;
-        if (is_animated && Abaddon::Get().GetSettings().ShowAnimations) {
-            const auto mark_start = buf->create_mark(start_it, false);
-            end_it.backward_char();
-            const auto mark_end = buf->create_mark(end_it, false);
-            const auto cb = [&tv, buf, mark_start, mark_end](const Glib::RefPtr<Gdk::PixbufAnimation> &pixbuf) {
-                auto start_it = mark_start->get_iter();
-                auto end_it = mark_end->get_iter();
-                end_it.forward_char();
-                buf->delete_mark(mark_start);
-                buf->delete_mark(mark_end);
-                auto it = buf->erase(start_it, end_it);
-                const auto anchor = buf->create_child_anchor(it);
-                auto img = Gtk::manage(new Gtk::Image(pixbuf));
-                img->show();
-                tv.add_child_at_anchor(*img, anchor);
-            };
-            img.LoadAnimationFromURL(EmojiData::URLFromID(match.fetch(2), "gif"), EmojiSize, EmojiSize, sigc::track_obj(cb, tv));
-        } else {
-            // can't erase before pixbuf is ready or else marks that are in the same pos get mixed up
-            const auto mark_start = buf->create_mark(start_it, false);
-            end_it.backward_char();
-            const auto mark_end = buf->create_mark(end_it, false);
-            const auto cb = [buf, mark_start, mark_end](const Glib::RefPtr<Gdk::Pixbuf> &pixbuf) {
-                auto start_it = mark_start->get_iter();
-                auto end_it = mark_end->get_iter();
-                end_it.forward_char();
-                buf->delete_mark(mark_start);
-                buf->delete_mark(mark_end);
-                auto it = buf->erase(start_it, end_it);
-                int width, height;
-                GetImageDimensions(pixbuf->get_width(), pixbuf->get_height(), width, height, EmojiSize, EmojiSize);
-                buf->insert_pixbuf(it, pixbuf->scale_simple(width, height, Gdk::INTERP_BILINEAR));
-            };
-            img.LoadFromURL(EmojiData::URLFromID(match.fetch(2)), sigc::track_obj(cb, tv));
-        }
-
-        text = GetText(buf);
-    }
-}
-
-void ChatMessageItemContainer::HandleEmojis(Gtk::TextView &tv) {
-    if (Abaddon::Get().GetSettings().ShowStockEmojis) HandleStockEmojis(tv);
-    if (Abaddon::Get().GetSettings().ShowCustomEmojis) HandleCustomEmojis(tv);
-}
-
-void ChatMessageItemContainer::CleanupEmojis(const Glib::RefPtr<Gtk::TextBuffer> &buf) {
-    static auto rgx = Glib::Regex::create(R"(<a?:([\w\d_]+):(\d+)>)");
-
-    auto text = GetText(buf);
-
-    Glib::MatchInfo match;
-    int startpos = 0;
-    while (rgx->match(text, startpos, match)) {
-        int mstart, mend;
-        if (!match.fetch_pos(0, mstart, mend)) break;
-
-        const auto new_term = ":" + match.fetch(1) + ":";
-
-        const auto chars_start = g_utf8_pointer_to_offset(text.c_str(), text.c_str() + mstart);
-        const auto chars_end = g_utf8_pointer_to_offset(text.c_str(), text.c_str() + mend);
-        auto start_it = buf->get_iter_at_offset(chars_start);
-        auto end_it = buf->get_iter_at_offset(chars_end);
-
-        startpos = mend;
-        const auto it = buf->erase(start_it, end_it);
-        const int alen = static_cast<int>(text.size());
-        text = GetText(buf);
-        const int blen = static_cast<int>(text.size());
-        startpos -= (alen - blen);
-
-        buf->insert(it, new_term);
-
-        text = GetText(buf);
-    }
-}
-
 void ChatMessageItemContainer::HandleChannelMentions(const Glib::RefPtr<Gtk::TextBuffer> &buf) {
     static auto rgx = Glib::Regex::create(R"(<#(\d+)>)");
 
-    Glib::ustring text = GetText(buf);
+    Glib::ustring text = ChatUtil::GetText(buf);
 
     const auto &discord = Abaddon::Get().GetDiscordClient();
 
@@ -950,13 +774,12 @@ void ChatMessageItemContainer::HandleChannelMentions(const Glib::RefPtr<Gtk::Tex
         it = buf->insert_with_tag(it, "#" + *chan->Name, tag);
 
         // rescan the whole thing so i dont have to deal with fixing match positions
-        text = GetText(buf);
+        text = ChatUtil::GetText(buf);
         startpos = 0;
     }
 }
 
 void ChatMessageItemContainer::HandleChannelMentions(Gtk::TextView *tv) {
-    tv->signal_button_press_event().connect(sigc::mem_fun(*this, &ChatMessageItemContainer::OnClickChannel), false);
     HandleChannelMentions(tv->get_buffer());
 }
 
@@ -990,6 +813,20 @@ bool ChatMessageItemContainer::OnClickChannel(GdkEventButton *ev) {
     return false;
 }
 
+bool ChatMessageItemContainer::OnTextViewButtonPress(GdkEventButton *ev) {
+    // run all button press handlers and propagate if none return true
+    if (OnLinkClick(ev)) return true;
+    if (OnClickChannel(ev)) return true;
+
+    if (ev->type == GDK_BUTTON_PRESS && ev->button == GDK_BUTTON_SECONDARY) {
+        // send the event upward skipping TextView's handler because we dont want it
+        gtk_propagate_event(GTK_WIDGET(m_main.gobj()), reinterpret_cast<GdkEvent *>(ev));
+        return true;
+    }
+
+    return false;
+}
+
 void ChatMessageItemContainer::on_link_menu_copy() {
     Gtk::Clipboard::get()->set_text(m_selected_link);
 }
@@ -997,10 +834,8 @@ void ChatMessageItemContainer::on_link_menu_copy() {
 void ChatMessageItemContainer::HandleLinks(Gtk::TextView &tv) {
     const auto rgx = Glib::Regex::create(R"(\bhttps?:\/\/[^\s]+\.[^\s]+\b)");
 
-    tv.signal_button_press_event().connect(sigc::mem_fun(*this, &ChatMessageItemContainer::OnLinkClick), false);
-
     auto buf = tv.get_buffer();
-    Glib::ustring text = GetText(buf);
+    Glib::ustring text = ChatUtil::GetText(buf);
 
     int startpos = 0;
     Glib::MatchInfo match;
@@ -1070,18 +905,6 @@ ChatMessageItemContainer::type_signal_action_reaction_remove ChatMessageItemCont
     return m_signal_action_reaction_remove;
 }
 
-void ChatMessageItemContainer::AttachEventHandlers(Gtk::Widget &widget) {
-    const auto on_button_press_event = [this](GdkEventButton *e) -> bool {
-        if (e->type == GDK_BUTTON_PRESS && e->button == GDK_BUTTON_SECONDARY) {
-            event(reinterpret_cast<GdkEvent *>(e)); // illegal ooooooh
-            return true;
-        }
-
-        return false;
-    };
-    widget.signal_button_press_event().connect(on_button_press_event, false);
-}
-
 ChatMessageHeader::ChatMessageHeader(const Message &data)
     : m_main_box(Gtk::ORIENTATION_HORIZONTAL)
     , m_content_box(Gtk::ORIENTATION_VERTICAL)
@@ -1122,7 +945,7 @@ ChatMessageHeader::ChatMessageHeader(const Message &data)
 
     m_meta_ev.signal_button_press_event().connect(sigc::mem_fun(*this, &ChatMessageHeader::on_author_button_press));
 
-    if (author->IsBot || data.WebhookID.has_value()) {
+    if (author->IsABot() || data.WebhookID.has_value()) {
         m_extra = Gtk::manage(new Gtk::Label);
         m_extra->get_style_context()->add_class("message-container-extra");
         m_extra->set_single_line_mode(true);
@@ -1130,7 +953,7 @@ ChatMessageHeader::ChatMessageHeader(const Message &data)
         m_extra->set_can_focus(false);
         m_extra->set_use_markup(true);
     }
-    if (author->IsBot)
+    if (author->IsABot())
         m_extra->set_markup("<b>BOT</b>");
     else if (data.WebhookID.has_value())
         m_extra->set_markup("<b>Webhook</b>");
@@ -1150,8 +973,6 @@ ChatMessageHeader::ChatMessageHeader(const Message &data)
 
     m_meta_box.set_hexpand(true);
     m_meta_box.set_can_focus(false);
-
-    m_content_box.set_can_focus(false);
 
     const auto on_enter_cb = [this](const GdkEventCrossing *event) -> bool {
         if (m_anim_avatar)

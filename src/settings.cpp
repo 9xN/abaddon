@@ -1,6 +1,15 @@
 #include "settings.hpp"
 #include <filesystem>
 #include <fstream>
+#include <glibmm/miscutils.h>
+
+#ifdef WITH_KEYCHAIN
+    #include <keychain/keychain.h>
+#endif
+
+const std::string KeychainPackage = "com.github.uowuo.abaddon";
+const std::string KeychainService = "abaddon-client-token";
+const std::string KeychainUser = "";
 
 SettingsManager::SettingsManager(const std::string &filename)
     : m_filename(filename) {
@@ -36,9 +45,9 @@ void SettingsManager::ReadSettings() {
 
     SMSTR("discord", "api_base", APIBaseURL);
     SMSTR("discord", "gateway", GatewayURL);
-    SMSTR("discord", "token", DiscordToken);
     SMBOOL("discord", "memory_db", UseMemoryDB);
     SMBOOL("discord", "prefetch", Prefetch);
+    SMBOOL("discord", "autoconnect", Autoconnect);
     SMSTR("gui", "css", MainCSS);
     SMBOOL("gui", "animated_guild_hover_only", AnimatedGuildHoverOnly);
     SMBOOL("gui", "animations", ShowAnimations);
@@ -48,6 +57,8 @@ void SettingsManager::ReadSettings() {
     SMBOOL("gui", "save_state", SaveState);
     SMBOOL("gui", "stock_emojis", ShowStockEmojis);
     SMBOOL("gui", "unreads", Unreads);
+    SMBOOL("gui", "alt_menu", AltMenu);
+    SMBOOL("gui", "hide_to_tray", HideToTray);
     SMINT("http", "concurrent", CacheHTTPConcurrency);
     SMSTR("http", "user_agent", UserAgent);
     SMSTR("style", "expandercolor", ChannelsExpanderColor);
@@ -57,6 +68,34 @@ void SettingsManager::ReadSettings() {
     SMSTR("style", "mentionbadgecolor", MentionBadgeColor);
     SMSTR("style", "mentionbadgetextcolor", MentionBadgeTextColor);
     SMSTR("style", "unreadcolor", UnreadIndicatorColor);
+    SMBOOL("notifications", "enabled", NotificationsEnabled);
+    SMBOOL("notifications", "playsound", NotificationsPlaySound);
+
+#ifdef WITH_KEYCHAIN
+    keychain::Error error {};
+
+    // convert to keychain if present in normal settings
+    SMSTR("discord", "token", DiscordToken);
+
+    if (!m_settings.DiscordToken.empty()) {
+        keychain::Error set_error {};
+
+        keychain::setPassword(KeychainPackage, KeychainService, KeychainUser, m_settings.DiscordToken, set_error);
+        if (set_error) {
+            printf("keychain error setting token: %s\n", set_error.message.c_str());
+        } else {
+            m_file.remove_key("discord", "token");
+        }
+    }
+
+    m_settings.DiscordToken = keychain::getPassword(KeychainPackage, KeychainService, KeychainUser, error);
+    if (error && error.type != keychain::ErrorType::NotFound) {
+        printf("keychain error reading token: %s (%d)\n", error.message.c_str(), error.code);
+    }
+
+#else
+    SMSTR("discord", "token", DiscordToken);
+#endif
 
 #undef SMBOOL
 #undef SMSTR
@@ -89,9 +128,9 @@ void SettingsManager::Close() {
 
         SMSTR("discord", "api_base", APIBaseURL);
         SMSTR("discord", "gateway", GatewayURL);
-        SMSTR("discord", "token", DiscordToken);
         SMBOOL("discord", "memory_db", UseMemoryDB);
         SMBOOL("discord", "prefetch", Prefetch);
+        SMBOOL("discord", "autoconnect", Autoconnect);
         SMSTR("gui", "css", MainCSS);
         SMBOOL("gui", "animated_guild_hover_only", AnimatedGuildHoverOnly);
         SMBOOL("gui", "animations", ShowAnimations);
@@ -101,6 +140,8 @@ void SettingsManager::Close() {
         SMBOOL("gui", "save_state", SaveState);
         SMBOOL("gui", "stock_emojis", ShowStockEmojis);
         SMBOOL("gui", "unreads", Unreads);
+        SMBOOL("gui", "alt_menu", AltMenu);
+        SMBOOL("gui", "hide_to_tray", HideToTray);
         SMINT("http", "concurrent", CacheHTTPConcurrency);
         SMSTR("http", "user_agent", UserAgent);
         SMSTR("style", "expandercolor", ChannelsExpanderColor);
@@ -110,6 +151,19 @@ void SettingsManager::Close() {
         SMSTR("style", "mentionbadgecolor", MentionBadgeColor);
         SMSTR("style", "mentionbadgetextcolor", MentionBadgeTextColor);
         SMSTR("style", "unreadcolor", UnreadIndicatorColor);
+        SMBOOL("notifications", "enabled", NotificationsEnabled);
+        SMBOOL("notifications", "playsound", NotificationsPlaySound);
+
+#ifdef WITH_KEYCHAIN
+        keychain::Error error {};
+
+        keychain::setPassword(KeychainPackage, KeychainService, KeychainUser, m_settings.DiscordToken, error);
+        if (error) {
+            printf("keychain error setting token: %s\n", error.message.c_str());
+        }
+#else
+        SMSTR("discord", "token", DiscordToken);
+#endif
 
 #undef SMSTR
 #undef SMBOOL

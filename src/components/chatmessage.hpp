@@ -1,8 +1,7 @@
 #pragma once
-#include <gtkmm.h>
 #include "discord/discord.hpp"
 
-class ChatMessageItemContainer : public Gtk::Box {
+class ChatMessageItemContainer : public Gtk::EventBox {
 public:
     Snowflake ID;
     Snowflake ChannelID;
@@ -30,20 +29,12 @@ protected:
     Gtk::Widget *CreateReactionsComponent(const Message &data);
     Gtk::Widget *CreateReplyComponent(const Message &data);
 
-    static Glib::ustring GetText(const Glib::RefPtr<Gtk::TextBuffer> &buf);
-
     static bool IsEmbedImageOnly(const EmbedData &data);
-
-    static void HandleRoleMentions(const Glib::RefPtr<Gtk::TextBuffer> &buf);
-    void HandleUserMentions(const Glib::RefPtr<Gtk::TextBuffer> &buf) const;
-    static void HandleStockEmojis(Gtk::TextView &tv);
-    static void HandleCustomEmojis(Gtk::TextView &tv);
-    static void HandleEmojis(Gtk::TextView &tv);
-    static void CleanupEmojis(const Glib::RefPtr<Gtk::TextBuffer> &buf);
 
     void HandleChannelMentions(const Glib::RefPtr<Gtk::TextBuffer> &buf);
     void HandleChannelMentions(Gtk::TextView *tv);
     bool OnClickChannel(GdkEventButton *ev);
+    bool OnTextViewButtonPress(GdkEventButton *ev);
 
     // reused for images and links
     Gtk::Menu m_link_menu;
@@ -56,8 +47,6 @@ protected:
     bool OnLinkClick(GdkEventButton *ev);
     std::map<Glib::RefPtr<Gtk::TextTag>, std::string> m_link_tagmap;
     std::map<Glib::RefPtr<Gtk::TextTag>, Snowflake> m_channel_tagmap;
-
-    void AttachEventHandlers(Gtk::Widget &widget);
 
     Gtk::EventBox *_ev;
     Gtk::Box m_main;

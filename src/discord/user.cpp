@@ -1,5 +1,8 @@
 #include "user.hpp"
-#include "abaddon.hpp"
+
+bool UserData::IsABot() const noexcept {
+    return IsBot.has_value() && *IsBot;
+}
 
 bool UserData::IsDeleted() const {
     return Discriminator == "0000";

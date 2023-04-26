@@ -12,6 +12,7 @@ public:
         std::string DiscordToken;
         bool UseMemoryDB { false };
         bool Prefetch { false };
+        bool Autoconnect { false };
 
         // [gui]
         std::string MainCSS { "main.css" };
@@ -27,6 +28,8 @@ public:
         bool ShowStockEmojis { true };
 #endif
         bool Unreads { true };
+        bool AltMenu { false };
+        bool HideToTray { false };
 
         // [http]
         int CacheHTTPConcurrency { 20 };
@@ -41,6 +44,14 @@ public:
         std::string MentionBadgeColor { "#b82525" };
         std::string MentionBadgeTextColor { "#fbfbfb" };
         std::string UnreadIndicatorColor { "#ffffff" };
+
+        // [notifications]
+#ifdef _WIN32
+        bool NotificationsEnabled { false };
+#else
+        bool NotificationsEnabled { true };
+#endif
+        bool NotificationsPlaySound { true };
     };
 
     SettingsManager(const std::string &filename);

@@ -1,6 +1,4 @@
-#include "abaddon.hpp"
 #include "discord.hpp"
-#include "util.hpp"
 #include <cinttypes>
 #include <utility>
 
@@ -30,6 +28,7 @@ void DiscordClient::Start() {
     if (m_client_started) return;
 
     m_http.SetBase(GetAPIURL());
+    SetHeaders();
 
     std::memset(&m_zstream, 0, sizeof(m_zstream));
     inflateInit2(&m_zstream, MAX_WBITS + 32);
@@ -80,6 +79,18 @@ std::unordered_set<Snowflake> DiscordClient::GetGuilds() const {
 
 const UserData &DiscordClient::GetUserData() const {
     return m_user_data;
+}
+
+const UserGuildSettingsData &DiscordClient::GetUserGuildSettings() const {
+    return m_user_guild_settings;
+}
+
+std::optional<UserGuildSettingsEntry> DiscordClient::GetSettingsForGuild(Snowflake id) const {
+    if (const auto it = m_user_guild_settings.Entries.find(id); it != m_user_guild_settings.Entries.end()) {
+        return it->second;
+    }
+
+    return std::nullopt;
 }
 
 std::vector<Snowflake> DiscordClient::GetUserSortedGuilds() const {
@@ -318,6 +329,10 @@ bool DiscordClient::HasGuildPermission(Snowflake user_id, Snowflake guild_id, Pe
     return (base & perm) == perm;
 }
 
+bool DiscordClient::HasSelfChannelPermission(Snowflake channel_id, Permission perm) const {
+    return HasChannelPermission(m_user_data.ID, channel_id, perm);
+}
+
 bool DiscordClient::HasAnyChannelPermission(Snowflake user_id, Snowflake channel_id, Permission perm) const {
     const auto channel = m_store.GetChannel(channel_id);
     if (!channel.has_value() || !channel->GuildID.has_value()) return false;
@@ -336,12 +351,10 @@ bool DiscordClient::HasChannelPermission(Snowflake user_id, Snowflake channel_id
 }
 
 Permission DiscordClient::ComputePermissions(Snowflake member_id, Snowflake guild_id) const {
-    const auto member = GetMember(member_id, guild_id);
-    const auto guild = GetGuild(guild_id);
-    if (!member.has_value() || !guild.has_value())
-        return Permission::NONE;
+    const auto member_roles = m_store.GetMemberRoles(guild_id, member_id);
+    const auto guild_owner = m_store.GetGuildOwner(guild_id);
 
-    if (guild->OwnerID == member_id)
+    if (guild_owner == member_id)
         return Permission::ALL;
 
     const auto everyone = GetRole(guild_id);
@@ -349,7 +362,7 @@ Permission DiscordClient::ComputePermissions(Snowflake member_id, Snowflake guil
         return Permission::NONE;
 
     Permission perms = everyone->Permissions;
-    for (const auto role_id : member->Roles) {
+    for (const auto role_id : member_roles) {
         const auto role = GetRole(role_id);
         if (role.has_value())
             perms |= role->Permissions;
@@ -366,8 +379,8 @@ Permission DiscordClient::ComputeOverwrites(Permission base, Snowflake member_id
         return Permission::ALL;
 
     const auto channel = GetChannel(channel_id);
-    const auto member = GetMember(member_id, *channel->GuildID);
-    if (!member.has_value() || !channel.has_value())
+    const auto member_roles = m_store.GetMemberRoles(*channel->GuildID, member_id);
+    if (!channel.has_value())
         return Permission::NONE;
 
     Permission perms = base;
@@ -379,7 +392,7 @@ Permission DiscordClient::ComputeOverwrites(Permission base, Snowflake member_id
 
     Permission allow = Permission::NONE;
     Permission deny = Permission::NONE;
-    for (const auto role_id : member->Roles) {
+    for (const auto role_id : member_roles) {
         const auto overwrite = GetPermissionOverwrite(channel_id, role_id);
         if (overwrite.has_value()) {
             allow |= overwrite->Allow;
@@ -409,7 +422,7 @@ bool DiscordClient::CanManageMember(Snowflake guild_id, Snowflake actor, Snowfla
     return actor_highest->Position > target_highest->Position;
 }
 
-void DiscordClient::ChatMessageCallback(const std::string &nonce, const http::response_type &response) {
+void DiscordClient::ChatMessageCallback(const std::string &nonce, const http::response_type &response, const sigc::slot<void(DiscordError)> &callback) {
     if (!CheckCode(response)) {
         if (response.status_code == http::TooManyRequests) {
             try { // not sure if this body is guaranteed
@@ -421,54 +434,108 @@ void DiscordClient::ChatMessageCallback(const std::string &nonce, const http::re
         } else {
             m_signal_message_send_fail.emit(nonce, 0);
         }
+
+        // todo actually callback with correct error code (not necessary rn)
+        callback(DiscordError::GENERIC);
+    } else {
+        callback(DiscordError::NONE);
     }
 }
 
-void DiscordClient::SendChatMessage(const std::string &content, Snowflake channel) {
-    // @([^@#]{1,32})#(\\d{4})
+void DiscordClient::SendChatMessageNoAttachments(const ChatSubmitParams &params, const sigc::slot<void(DiscordError)> &callback) {
     const auto nonce = std::to_string(Snowflake::FromNow());
+
     CreateMessageObject obj;
-    obj.Content = content;
+    obj.Content = params.Message;
     obj.Nonce = nonce;
-    m_http.MakePOST("/channels/" + std::to_string(channel) + "/messages", nlohmann::json(obj).dump(), sigc::bind<0>(sigc::mem_fun(*this, &DiscordClient::ChatMessageCallback), nonce));
-    // dummy data so the content can be shown while waiting for MESSAGE_CREATE
+    if (params.InReplyToID.IsValid())
+        obj.MessageReference.emplace().MessageID = params.InReplyToID;
+
+    m_http.MakePOST("/channels/" + std::to_string(params.ChannelID) + "/messages",
+                    nlohmann::json(obj).dump(),
+                    [this, nonce, callback](const http::response_type &r) {
+                        ChatMessageCallback(nonce, r, callback);
+                    });
+
+    // dummy preview data
     Message tmp;
-    tmp.Content = content;
+    tmp.Content = params.Message;
     tmp.ID = nonce;
-    tmp.ChannelID = channel;
+    tmp.ChannelID = params.ChannelID;
     tmp.Author = GetUserData();
     tmp.IsTTS = false;
     tmp.DoesMentionEveryone = false;
     tmp.Type = MessageType::DEFAULT;
     tmp.IsPinned = false;
     tmp.Timestamp = "2000-01-01T00:00:00.000000+00:00";
-    tmp.Nonce = obj.Nonce;
+    tmp.Nonce = nonce;
     tmp.IsPending = true;
+
     m_store.SetMessage(tmp.ID, tmp);
-    m_signal_message_sent.emit(tmp);
+    m_signal_message_create.emit(tmp);
 }
 
-void DiscordClient::SendChatMessage(const std::string &content, Snowflake channel, Snowflake referenced_message) {
+void DiscordClient::SendChatMessageAttachments(const ChatSubmitParams &params, const sigc::slot<void(DiscordError)> &callback) {
     const auto nonce = std::to_string(Snowflake::FromNow());
+
     CreateMessageObject obj;
-    obj.Content = content;
+    obj.Content = params.Message;
     obj.Nonce = nonce;
-    obj.MessageReference.emplace().MessageID = referenced_message;
-    m_http.MakePOST("/channels/" + std::to_string(channel) + "/messages", nlohmann::json(obj).dump(), sigc::bind<0>(sigc::mem_fun(*this, &DiscordClient::ChatMessageCallback), nonce));
+    if (params.InReplyToID.IsValid())
+        obj.MessageReference.emplace().MessageID = params.InReplyToID;
+
+    auto req = m_http.CreateRequest(http::REQUEST_POST, "/channels/" + std::to_string(params.ChannelID) + "/messages");
+    m_progress_cb_timer.start();
+    req.set_progress_callback([this, nonce](curl_off_t ultotal, curl_off_t ulnow) {
+        if (m_progress_cb_timer.elapsed() < 0.0417) return; // try to prevent it from blocking ui
+        m_progress_cb_timer.start();
+        m_generic_mutex.lock();
+        m_generic_queue.push([this, nonce, ultotal, ulnow] {
+            m_signal_message_progress.emit(
+                nonce,
+                static_cast<float>(ulnow) / static_cast<float>(ultotal));
+        });
+        m_generic_mutex.unlock();
+        m_generic_dispatch.emit();
+    });
+    req.make_form();
+    req.add_field("payload_json", nlohmann::json(obj).dump().c_str(), CURL_ZERO_TERMINATED);
+    for (size_t i = 0; i < params.Attachments.size(); i++) {
+        const auto field_name = "files[" + std::to_string(i) + "]";
+        req.add_file(field_name, params.Attachments.at(i).File, params.Attachments.at(i).Filename);
+    }
+    m_http.Execute(std::move(req), [this, params, nonce, callback](const http::response_type &res) {
+        for (const auto &attachment : params.Attachments) {
+            if (attachment.Type == ChatSubmitParams::AttachmentType::PastedImage) {
+                attachment.File->remove();
+            }
+        }
+        ChatMessageCallback(nonce, res, callback);
+    });
+
+    // dummy preview data
     Message tmp;
-    tmp.Content = content;
+    tmp.Content = params.Message;
     tmp.ID = nonce;
-    tmp.ChannelID = channel;
+    tmp.ChannelID = params.ChannelID;
     tmp.Author = GetUserData();
     tmp.IsTTS = false;
     tmp.DoesMentionEveryone = false;
     tmp.Type = MessageType::DEFAULT;
     tmp.IsPinned = false;
     tmp.Timestamp = "2000-01-01T00:00:00.000000+00:00";
-    tmp.Nonce = obj.Nonce;
+    tmp.Nonce = nonce;
     tmp.IsPending = true;
+
     m_store.SetMessage(tmp.ID, tmp);
-    m_signal_message_sent.emit(tmp);
+    m_signal_message_create.emit(tmp);
+}
+
+void DiscordClient::SendChatMessage(const ChatSubmitParams &params, const sigc::slot<void(DiscordError)> &callback) {
+    if (params.Attachments.empty())
+        SendChatMessageNoAttachments(params, callback);
+    else
+        SendChatMessageAttachments(params, callback);
 }
 
 void DiscordClient::DeleteMessage(Snowflake channel_id, Snowflake id) {
@@ -514,10 +581,6 @@ void DiscordClient::SendThreadLazyLoad(Snowflake id) {
     m_websocket.Send(msg);
 }
 
-void DiscordClient::JoinGuild(const std::string &code) {
-    m_http.MakePOST("/invites/" + code, "{}", [](auto) {});
-}
-
 void DiscordClient::LeaveGuild(Snowflake id) {
     m_http.MakeDELETE("/users/@me/guilds/" + std::to_string(id), [](auto) {});
 }
@@ -550,19 +613,6 @@ void DiscordClient::UpdateStatus(PresenceStatus status, bool is_afk, const Activ
     m_websocket.Send(nlohmann::json(msg));
     m_user_to_status[m_user_data.ID] = status;
     m_signal_presence_update.emit(GetUserData(), status);
-}
-
-void DiscordClient::CreateDM(Snowflake user_id, const sigc::slot<void(DiscordError code, Snowflake channel_id)> &callback) {
-    CreateDMObject obj;
-    obj.Recipients.push_back(user_id);
-    m_http.MakePOST("/users/@me/channels", nlohmann::json(obj).dump(), [callback](const http::response &response) {
-        if (!CheckCode(response)) {
-            callback(DiscordError::NONE, Snowflake::Invalid);
-            return;
-        }
-        auto channel = nlohmann::json::parse(response.text).get<ChannelData>();
-        callback(GetCodeFromResponse(response), channel.ID);
-    });
 }
 
 void DiscordClient::CloseDM(Snowflake channel_id) {
@@ -1123,6 +1173,33 @@ void DiscordClient::AcceptVerificationGate(Snowflake guild_id, VerificationGateI
     });
 }
 
+void DiscordClient::SetReferringChannel(Snowflake id) {
+    if (!id.IsValid()) {
+        m_http.SetPersistentHeader("Referer", "https://discord.com/channels/@me");
+    } else {
+        const auto channel = GetChannel(id);
+        if (channel.has_value()) {
+            if (channel->IsDM()) {
+                m_http.SetPersistentHeader("Referer", "https://discord.com/channels/@me/" + std::to_string(id));
+            } else if (channel->GuildID.has_value()) {
+                m_http.SetPersistentHeader("Referer", "https://discord.com/channels/" + std::to_string(*channel->GuildID) + "/" + std::to_string(id));
+            } else {
+                m_http.SetPersistentHeader("Referer", "https://discord.com/channels/@me");
+            }
+        } else {
+            m_http.SetPersistentHeader("Referer", "https://discord.com/channels/@me");
+        }
+    }
+}
+
+void DiscordClient::SetBuildNumber(uint32_t build_number) {
+    m_build_number = build_number;
+}
+
+void DiscordClient::SetCookie(std::string_view cookie) {
+    m_http.SetCookie(cookie);
+}
+
 void DiscordClient::UpdateToken(const std::string &token) {
     if (!IsStarted()) {
         m_token = token;
@@ -1133,6 +1210,10 @@ void DiscordClient::UpdateToken(const std::string &token) {
 void DiscordClient::SetUserAgent(const std::string &agent) {
     m_http.SetUserAgent(agent);
     m_websocket.SetUserAgent(agent);
+}
+
+void DiscordClient::SetDumpReady(bool dump) {
+    m_dump_ready = dump;
 }
 
 bool DiscordClient::IsChannelMuted(Snowflake id) const noexcept {
@@ -1500,6 +1581,17 @@ void DiscordClient::ProcessNewGuild(GuildData &guild) {
 
 void DiscordClient::HandleGatewayReady(const GatewayMessage &msg) {
     m_ready_received = true;
+
+    if (m_dump_ready) {
+        const auto name = "./payload_ready-" + Glib::DateTime::create_now_utc().format("%Y-%m-%d_%H-%M-%S") + ".json";
+        auto *fp = std::fopen(name.c_str(), "wb");
+        if (fp != nullptr) {
+            const auto contents = msg.Data.dump(4);
+            std::fwrite(contents.data(), contents.size(), 1, fp);
+            std::fclose(fp);
+        }
+    }
+
     ReadyEventData data = msg.Data;
     for (auto &g : data.Guilds)
         ProcessNewGuild(g);
@@ -1540,6 +1632,8 @@ void DiscordClient::HandleGatewayReady(const GatewayMessage &msg) {
     m_session_id = data.SessionID;
     m_user_data = data.SelfUser;
     m_user_settings = data.Settings;
+    m_user_guild_settings = data.GuildSettings;
+    // TODO handle update
 
     HandleReadyReadState(data);
     HandleReadyGuildSettings(data);
@@ -1957,6 +2051,9 @@ void DiscordClient::HandleGatewayMessageAck(const GatewayMessage &msg) {
 
 void DiscordClient::HandleGatewayUserGuildSettingsUpdate(const GatewayMessage &msg) {
     UserGuildSettingsUpdateData data = msg.Data;
+
+    m_user_guild_settings.Entries[data.Settings.GuildID] = data.Settings;
+
     const bool for_dms = !data.Settings.GuildID.IsValid();
 
     const auto channels = for_dms ? GetPrivateChannels() : GetChannelsInGuild(data.Settings.GuildID);
@@ -2215,6 +2312,10 @@ std::set<Snowflake> DiscordClient::GetPrivateChannels() const {
     return {};
 }
 
+const UserSettings &DiscordClient::GetUserSettings() const {
+    return m_user_settings;
+}
+
 EPremiumType DiscordClient::GetSelfPremiumType() const {
     const auto &data = GetUserData();
     if (data.PremiumType.has_value())
@@ -2243,7 +2344,7 @@ void DiscordClient::HeartbeatThread() {
 void DiscordClient::SendIdentify() {
     IdentifyMessage msg;
     msg.Token = m_token;
-    msg.Capabilities = 125; // no idea what this is
+    msg.Capabilities = 509; // no idea what this is
     msg.Properties.OS = "Windows";
     msg.Properties.Browser = "Chrome";
     msg.Properties.Device = "";
@@ -2256,7 +2357,7 @@ void DiscordClient::SendIdentify() {
     msg.Properties.ReferrerCurrent = "";
     msg.Properties.ReferringDomainCurrent = "";
     msg.Properties.ReleaseChannel = "stable";
-    msg.Properties.ClientBuildNumber = 105691;
+    msg.Properties.ClientBuildNumber = m_build_number;
     msg.Properties.ClientEventSource = "";
     msg.Presence.Status = "online";
     msg.Presence.Since = 0;
@@ -2265,6 +2366,7 @@ void DiscordClient::SendIdentify() {
     msg.ClientState.HighestLastMessageID = "0";
     msg.ClientState.ReadStateVersion = 0;
     msg.ClientState.UserGuildSettingsVersion = -1;
+    SetSuperPropertiesFromIdentity(msg);
     const bool b = m_websocket.GetPrintMessages();
     m_websocket.SetPrintMessages(false);
     m_websocket.Send(msg);
@@ -2277,6 +2379,36 @@ void DiscordClient::SendResume() {
     msg.SessionID = m_session_id;
     msg.Token = m_token;
     m_websocket.Send(msg);
+}
+
+void DiscordClient::SetHeaders() {
+    m_http.SetPersistentHeader("Sec-Fetch-Dest", "empty");
+    m_http.SetPersistentHeader("Sec-Fetch-Mode", "cors");
+    m_http.SetPersistentHeader("Sec-Fetch-Site", "same-origin");
+    m_http.SetPersistentHeader("X-Debug-Options", "bugReporterEnabled");
+    m_http.SetPersistentHeader("Accept-Language", "en-US,en;q=0.9");
+
+    SetReferringChannel(Snowflake::Invalid);
+}
+
+void DiscordClient::SetSuperPropertiesFromIdentity(const IdentifyMessage &identity) {
+    nlohmann::ordered_json j;
+    j["os"] = identity.Properties.OS;
+    j["browser"] = identity.Properties.Browser;
+    j["device"] = identity.Properties.Device;
+    j["system_locale"] = identity.Properties.SystemLocale;
+    j["browser_user_agent"] = identity.Properties.BrowserUserAgent;
+    j["browser_version"] = identity.Properties.BrowserVersion;
+    j["os_version"] = identity.Properties.OSVersion;
+    j["referrer"] = identity.Properties.Referrer;
+    j["referring_domain"] = identity.Properties.ReferringDomain;
+    j["referrer_current"] = identity.Properties.ReferrerCurrent;
+    j["referring_domain_current"] = identity.Properties.ReferringDomainCurrent;
+    j["release_channel"] = identity.Properties.ReleaseChannel;
+    j["client_build_number"] = identity.Properties.ClientBuildNumber;
+    j["client_event_source"] = nullptr; // probably will never be non-null ("") anyways
+    m_http.SetPersistentHeader("X-Super-Properties", Glib::Base64::encode(j.dump()));
+    m_http.SetPersistentHeader("X-Discord-Locale", identity.Properties.SystemLocale);
 }
 
 void DiscordClient::HandleSocketOpen() {
@@ -2344,9 +2476,11 @@ void DiscordClient::StoreMessageData(Message &msg) {
     if (msg.Member.has_value())
         m_store.SetGuildMember(*msg.GuildID, msg.Author.ID, *msg.Member);
 
-    if (msg.Interaction.has_value() && msg.Interaction->Member.has_value()) {
+    if (msg.Interaction.has_value()) {
         m_store.SetUser(msg.Interaction->User.ID, msg.Interaction->User);
-        m_store.SetGuildMember(*msg.GuildID, msg.Interaction->User.ID, *msg.Interaction->Member);
+        if (msg.Interaction->Member.has_value()) {
+            m_store.SetGuildMember(*msg.GuildID, msg.Interaction->User.ID, *msg.Interaction->Member);
+        }
     }
 
     m_store.EndTransaction();
@@ -2418,7 +2552,7 @@ void DiscordClient::HandleReadyGuildSettings(const ReadyEventData &data) {
     }
 
     const auto now = Snowflake::FromNow();
-    for (const auto &entry : data.GuildSettings.Entries) {
+    for (const auto &[guild_id, entry] : data.GuildSettings.Entries) {
         // even if muted is true a guild/channel can be unmuted if the current time passes mute_config.end_time
         if (entry.Muted) {
             if (entry.MuteConfig.EndTime.has_value()) {
@@ -2545,6 +2679,10 @@ DiscordClient::type_signal_disconnected DiscordClient::signal_disconnected() {
 
 DiscordClient::type_signal_connected DiscordClient::signal_connected() {
     return m_signal_connected;
+}
+
+DiscordClient::type_signal_message_progress DiscordClient::signal_message_progress() {
+    return m_signal_message_progress;
 }
 
 DiscordClient::type_signal_role_update DiscordClient::signal_role_update() {

@@ -1,8 +1,6 @@
 #include "imgmanager.hpp"
 
 #include <utility>
-#include "util.hpp"
-#include "abaddon.hpp"
 
 ImageManager::ImageManager() {
     m_cb_dispatcher.connect(sigc::mem_fun(*this, &ImageManager::RunCallbacks));
@@ -102,4 +100,8 @@ Glib::RefPtr<Gdk::Pixbuf> ImageManager::GetPlaceholder(int size) {
         fprintf(stderr, "error loading placeholder\n");
         return Glib::RefPtr<Gdk::Pixbuf>(nullptr);
     }
+}
+
+Cache &ImageManager::GetCache() {
+    return m_cache;
 }

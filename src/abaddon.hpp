@@ -1,13 +1,17 @@
-#include <gtkmm.h>
+#pragma once
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_set>
+#include <gtkmm/application.h>
+#include <gtkmm/cssprovider.h>
+#include <gtkmm/statusicon.h>
 #include "discord/discord.hpp"
 #include "windows/mainwindow.hpp"
 #include "settings.hpp"
 #include "imgmanager.hpp"
 #include "emojis.hpp"
+#include "notifications/notifications.hpp"
 
 #define APP_TITLE "Abaddon"
 
@@ -36,7 +40,7 @@ public:
     void ActionSetToken();
     void ActionJoinGuildDialog();
     void ActionChannelOpened(Snowflake id, bool expand_to = true);
-    void ActionChatInputSubmit(std::string msg, Snowflake channel, Snowflake referenced_message);
+    void ActionChatInputSubmit(ChatSubmitParams data);
     void ActionChatLoadHistory(Snowflake id);
     void ActionChatEditMessage(Snowflake channel_id, Snowflake id);
     void ActionInsertMention(Snowflake id);
@@ -51,6 +55,7 @@ public:
     void ActionViewPins(Snowflake channel_id);
     void ActionViewThreads(Snowflake channel_id);
 
+    std::optional<Glib::ustring> ShowTextPrompt(const Glib::ustring &prompt, const Glib::ustring &title, const Glib::ustring &placeholder = "", Gtk::Window *window = nullptr);
     bool ShowConfirm(const Glib::ustring &prompt, Gtk::Window *window = nullptr);
 
     void ActionReloadCSS();
@@ -91,7 +96,13 @@ public:
     static std::string GetResPath(const std::string &path);
     static std::string GetStateCachePath(const std::string &path);
 
+    [[nodiscard]] Glib::RefPtr<Gtk::Application> GetApp();
+    [[nodiscard]] bool IsMainWindowActive();
+    [[nodiscard]] Snowflake GetActiveChannelID() const noexcept;
+
 protected:
+    void RunFirstTimeDiscordStartup();
+
     void ShowGuildVerificationGateDialog(Snowflake guild_id);
 
     void CheckMessagesForMembers(const ChannelData &chan, const std::vector<Message> &msgs);
@@ -113,6 +124,8 @@ protected:
     Gtk::MenuItem *m_user_menu_roles;
     Gtk::MenuItem *m_user_menu_remove_recipient;
     Gtk::Menu *m_user_menu_roles_submenu;
+    Gtk::Menu *m_tray_menu;
+    Gtk::MenuItem *m_tray_exit;
 
     void on_user_menu_insert_mention();
     void on_user_menu_ban();
@@ -120,6 +133,10 @@ protected:
     void on_user_menu_copy_id();
     void on_user_menu_open_dm();
     void on_user_menu_remove_recipient();
+    void on_tray_click();
+    void on_tray_popup_menu(int button, int activate_time);
+    void on_tray_menu_click();
+    void on_window_hide();
 
 private:
     SettingsManager m_settings;
@@ -138,5 +155,8 @@ private:
     Glib::RefPtr<Gtk::Application> m_gtk_app;
     Glib::RefPtr<Gtk::CssProvider> m_css_provider;
     Glib::RefPtr<Gtk::CssProvider> m_css_low_provider; // registered with a lower priority to allow better customization
-    std::unique_ptr<MainWindow> m_main_window;         // wah wah cant create a gtkstylecontext fuck you
+    Glib::RefPtr<Gtk::StatusIcon> m_tray;
+    std::unique_ptr<MainWindow> m_main_window; // wah wah cant create a gtkstylecontext fuck you
+
+    Notifications m_notifications;
 };

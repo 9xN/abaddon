@@ -1,10 +1,10 @@
 #pragma once
-#include <gtkmm.h>
 
 class ConfirmDialog : public Gtk::Dialog {
 public:
     ConfirmDialog(Gtk::Window &parent);
     void SetConfirmText(const Glib::ustring &text);
+    void SetAcceptOnly(bool accept_only);
 
 protected:
     Gtk::Label m_label;

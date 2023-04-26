@@ -254,6 +254,14 @@ void Store::SetGuildMember(Snowflake guild_id, Snowflake user_id, const GuildMem
     s->Reset();
 
     {
+        auto &s = m_stmt_clr_member_roles;
+        s->Bind(1, user_id);
+        s->Bind(2, guild_id);
+        s->Step();
+        s->Reset();
+    }
+
+    {
         auto &s = m_stmt_set_member_roles;
 
         BeginTransaction();
@@ -335,6 +343,15 @@ void Store::SetMessage(Snowflake id, const Message &message) {
         s->Bind(2, u.ID);
         if (!s->Insert())
             fprintf(stderr, "message mention insert failed for %" PRIu64 "/%" PRIu64 ": %s\n", static_cast<uint64_t>(id), static_cast<uint64_t>(u.ID), m_db.ErrStr());
+        s->Reset();
+    }
+
+    for (const auto &r : message.MentionRoles) {
+        auto &s = m_stmt_set_role_mention;
+        s->Bind(1, id);
+        s->Bind(2, r);
+        if (!s->Insert())
+            fprintf(stderr, "message role mention insert failed for %" PRIu64 "/%" PRIu64 ": %s\n", static_cast<uint64_t>(id), static_cast<uint64_t>(r), m_db.ErrStr());
         s->Reset();
     }
 
@@ -458,6 +475,40 @@ std::vector<BanData> Store::GetBans(Snowflake guild_id) const {
         auto &ban = ret.emplace_back();
         s->Get(1, ban.User.ID);
         s->Get(2, ban.Reason);
+    }
+
+    s->Reset();
+
+    return ret;
+}
+
+Snowflake Store::GetGuildOwner(Snowflake guild_id) const {
+    auto &s = m_stmt_get_guild_owner;
+
+    s->Bind(1, guild_id);
+    if (s->FetchOne()) {
+        Snowflake ret;
+        s->Get(0, ret);
+        s->Reset();
+        return ret;
+    }
+
+    s->Reset();
+
+    return Snowflake::Invalid;
+}
+
+std::vector<Snowflake> Store::GetMemberRoles(Snowflake guild_id, Snowflake user_id) const {
+    std::vector<Snowflake> ret;
+
+    auto &s = m_stmt_get_member_roles;
+
+    s->Bind(1, user_id);
+    s->Bind(2, guild_id);
+
+    while (s->FetchOne()) {
+        auto &f = ret.emplace_back();
+        s->Get(0, f);
     }
 
     s->Reset();
@@ -737,7 +788,9 @@ std::optional<GuildData> Store::GetGuild(Snowflake id) const {
     s->Get(1, r.Name);
     s->Get(2, r.Icon);
     s->Get(5, r.OwnerID);
+    s->Get(11, r.DefaultMessageNotifications);
     s->Get(20, r.IsUnavailable);
+    s->Get(27, r.PremiumTier);
 
     s->Reset();
 
@@ -939,6 +992,17 @@ Message Store::GetMessageBound(std::unique_ptr<Statement> &s) const {
             auto user = GetUser(id);
             if (user.has_value())
                 r.Mentions.push_back(std::move(*user));
+        }
+        s->Reset();
+    }
+
+    {
+        auto &s = m_stmt_get_role_mentions;
+        s->Bind(1, r.ID);
+        while (s->FetchOne()) {
+            Snowflake id;
+            s->Get(0, id);
+            r.MentionRoles.push_back(id);
         }
         s->Reset();
     }
@@ -1393,6 +1457,14 @@ bool Store::CreateTables() {
         )
     )";
 
+    const char *create_mention_roles = R"(
+        CREATE TABLE IF NOT EXISTS mention_roles (
+            message INTEGER NOT NULL,
+            role INTEGER NOT NULL,
+            PRIMARY KEY(message, role)
+        )
+    )";
+
     const char *create_attachments = R"(
         CREATE TABLE IF NOT EXISTS attachments (
             message INTEGER NOT NULL,
@@ -1509,6 +1581,11 @@ bool Store::CreateTables() {
 
     if (m_db.Execute(create_mentions) != SQLITE_OK) {
         fprintf(stderr, "failed to create mentions table: %s\n", m_db.ErrStr());
+        return false;
+    }
+
+    if (m_db.Execute(create_mention_roles) != SQLITE_OK) {
+        fprintf(stderr, "failed to create role mentions table: %s\n", m_db.ErrStr());
         return false;
     }
 
@@ -1881,6 +1958,20 @@ bool Store::CreateStatements() {
         return false;
     }
 
+    m_stmt_clr_member_roles = std::make_unique<Statement>(m_db, R"(
+        DELETE FROM member_roles
+        WHERE user = ? AND
+        EXISTS (
+            SELECT 1 FROM roles
+            WHERE member_roles.role = roles.id
+            AND roles.guild = ?
+        )
+    )");
+    if (!m_stmt_clr_member_roles->OK()) {
+        fprintf(stderr, "failed to prepare clear member roles statement: %s\n", m_db.ErrStr());
+        return false;
+    }
+
     m_stmt_set_guild_emoji = std::make_unique<Statement>(m_db, R"(
         REPLACE INTO guild_emojis VALUES (
             ?, ?
@@ -2061,6 +2152,24 @@ bool Store::CreateStatements() {
         return false;
     }
 
+    m_stmt_set_role_mention = std::make_unique<Statement>(m_db, R"(
+        REPLACE INTO mention_roles VALUES (
+            ?, ?
+        )
+    )");
+    if (!m_stmt_set_role_mention->OK()) {
+        fprintf(stderr, "failed to prepare set role mention statement: %s\n", m_db.ErrStr());
+        return false;
+    }
+
+    m_stmt_get_role_mentions = std::make_unique<Statement>(m_db, R"(
+        SELECT role FROM mention_roles WHERE message = ?
+    )");
+    if (!m_stmt_get_role_mentions->OK()) {
+        fprintf(stderr, "failed to prepare get role mentions statement: %s\n", m_db.ErrStr());
+        return false;
+    }
+
     m_stmt_set_attachment = std::make_unique<Statement>(m_db, R"(
         REPLACE INTO attachments VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?
@@ -2172,6 +2281,14 @@ bool Store::CreateStatements() {
     )");
     if (!m_stmt_clr_role->OK()) {
         fprintf(stderr, "failed to prepare clear role statement: %s\n", m_db.ErrStr());
+        return false;
+    }
+
+    m_stmt_get_guild_owner = std::make_unique<Statement>(m_db, R"(
+        SELECT owner_id FROM guilds WHERE id = ?
+    )");
+    if (!m_stmt_get_guild_owner->OK()) {
+        fprintf(stderr, "failed to prepare get guild owner statement: %s\n", m_db.ErrStr());
         return false;
     }
 

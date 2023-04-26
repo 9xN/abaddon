@@ -8,12 +8,24 @@
 #include <string>
 #include <unordered_set>
 
+enum class DefaultNotificationLevel {
+    ALL_MESSAGES = 0,
+    ONLY_MENTIONS = 1,
+};
+
 enum class GuildApplicationStatus {
     STARTED,
     PENDING,
     REJECTED,
     APPROVED,
     UNKNOWN,
+};
+
+enum class GuildPremiumTier {
+    NONE = 0,
+    TIER_1 = 1,
+    TIER_2 = 2,
+    TIER_3 = 3,
 };
 
 struct GuildApplicationData {
@@ -29,9 +41,6 @@ struct GuildApplicationData {
 
 // a bot is apparently only supposed to receive the `id` and `unavailable` as false
 // but user tokens seem to get the full objects (minus users)
-
-// everythings optional cuz of muh partial guild object
-// anything not marked optional in https://discord.com/developers/docs/resources/guild#guild-object is guaranteed to be set when returned from Store::GetGuild
 struct GuildData {
     Snowflake ID;
     std::string Name;
@@ -48,7 +57,7 @@ struct GuildData {
     std::optional<bool> IsEmbedEnabled;      // deprecated
     std::optional<Snowflake> EmbedChannelID; // null, deprecated
     std::optional<int> VerificationLevel;
-    std::optional<int> DefaultMessageNotifications;
+    std::optional<DefaultNotificationLevel> DefaultMessageNotifications;
     std::optional<int> ExplicitContentFilter;
     std::optional<std::vector<RoleData>> Roles;
     std::optional<std::vector<EmojiData>> Emojis; // only access id
@@ -73,7 +82,7 @@ struct GuildData {
     std::optional<std::string> VanityURL;   // null
     std::optional<std::string> Description; // null
     std::optional<std::string> BannerHash;  // null
-    std::optional<int> PremiumTier;
+    std::optional<GuildPremiumTier> PremiumTier;
     std::optional<int> PremiumSubscriptionCount;
     std::optional<std::string> PreferredLocale;
     std::optional<Snowflake> PublicUpdatesChannelID; // null

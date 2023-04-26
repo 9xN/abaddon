@@ -8,6 +8,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
 
 option(USE_LIBHANDY "Enable features that require libhandy (default)" ON)
+option(USE_KEYCHAIN "Store the token in the keychain (default)" ON)
+option(ENABLE_NOTIFICATION_SOUNDS "Enable notification sounds (default)" ON)
 
 find_package(nlohmann_json REQUIRED)
 find_package(CURL)
@@ -33,6 +35,12 @@ if (WIN32)
     add_compile_definitions(NOMINMAX)
 endif ()
 
+include(TestBigEndian)
+test_big_endian(IS_BIG_ENDIAN)
+if (IS_BIG_ENDIAN)
+    add_compile_definitions(ABADDON_IS_BIG_ENDIAN)
+endif ()
+
 configure_file(${PROJECT_SOURCE_DIR}/src/config.h.in ${PROJECT_BINARY_DIR}/config.h)
 
 file(GLOB_RECURSE ABADDON_SOURCES
@@ -40,6 +48,9 @@ file(GLOB_RECURSE ABADDON_SOURCES
         "src/*.hpp"
         "src/*.cpp"
         )
+
+list(FILTER ABADDON_SOURCES EXCLUDE REGEX ".*notifier_gio\\.cpp$")
+list(FILTER ABADDON_SOURCES EXCLUDE REGEX ".*notifier_null\\.cpp$")
 
 add_executable(abaddon ${ABADDON_SOURCES})
 target_include_directories(abaddon PUBLIC ${PROJECT_SOURCE_DIR}/src)
@@ -49,10 +60,18 @@ target_include_directories(abaddon PUBLIC ${ZLIB_INCLUDE_DIRS})
 target_include_directories(abaddon PUBLIC ${SQLite3_INCLUDE_DIRS})
 target_include_directories(abaddon PUBLIC ${NLOHMANN_JSON_INCLUDE_DIRS})
 
+target_precompile_headers(abaddon PRIVATE <gtkmm.h> src/abaddon.hpp src/util.hpp)
+
 if ((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR
 (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND
 ((CMAKE_SYSTEM_NAME STREQUAL "Linux") OR (CMAKE_CXX_COMPILER_VERSION LESS 9))))
     target_link_libraries(abaddon stdc++fs)
+endif ()
+
+if (NOT WIN32)
+    target_sources(abaddon PRIVATE src/notifications/notifier_gio.cpp)
+else ()
+    target_sources(abaddon PRIVATE src/notifications/notifier_null.cpp)
 endif ()
 
 if (IXWebSocket_LIBRARIES)
@@ -90,13 +109,29 @@ target_link_libraries(abaddon ${ZLIB_LIBRARY})
 target_link_libraries(abaddon ${NLOHMANN_JSON_LIBRARIES})
 
 if (USE_LIBHANDY)
-    find_package(libhandy)
-    if (NOT libhandy_FOUND)
-        message("libhandy could not be found. features requiring it have been disabled")
-        set(USE_LIBHANDY OFF)
-    else ()
-        target_include_directories(abaddon PUBLIC ${libhandy_INCLUDE_DIRS})
-        target_link_libraries(abaddon ${libhandy_LIBRARIES})
-        target_compile_definitions(abaddon PRIVATE WITH_LIBHANDY)
+    find_package(libhandy REQUIRED)
+    target_include_directories(abaddon PUBLIC ${libhandy_INCLUDE_DIRS})
+    target_link_libraries(abaddon ${libhandy_LIBRARIES})
+    target_compile_definitions(abaddon PRIVATE WITH_LIBHANDY)
+endif ()
+
+if (USE_KEYCHAIN)
+    find_package(keychain QUIET)
+    if (NOT keychain_FOUND)
+        message("keychain was not found and will be included as a submodule")
+        add_subdirectory(subprojects/keychain)
+        target_link_libraries(abaddon keychain)
+        target_compile_definitions(abaddon PRIVATE WITH_KEYCHAIN)
     endif ()
+endif ()
+
+if (${ENABLE_NOTIFICATION_SOUNDS})
+    set(USE_MINIAUDIO TRUE)
+    target_compile_definitions(abaddon PRIVATE ENABLE_NOTIFICATION_SOUNDS)
+else ()
+    set(USE_MINIAUDIO FALSE)
+endif ()
+
+if (USE_MINIAUDIO)
+    target_include_directories(abaddon PUBLIC subprojects/miniaudio)
 endif ()

@@ -1,5 +1,4 @@
 #pragma once
-#include "util.hpp"
 #include "objects.hpp"
 #include <unordered_map>
 #include <unordered_set>
@@ -38,6 +37,9 @@ public:
     std::optional<UserData> GetUser(Snowflake id) const;
     std::optional<BanData> GetBan(Snowflake guild_id, Snowflake user_id) const;
     std::vector<BanData> GetBans(Snowflake guild_id) const;
+
+    Snowflake GetGuildOwner(Snowflake guild_id) const;
+    std::vector<Snowflake> GetMemberRoles(Snowflake guild_id, Snowflake user_id) const;
 
     std::vector<Message> GetLastMessages(Snowflake id, size_t num) const;
     std::vector<Message> GetMessagesBefore(Snowflake channel_id, Snowflake message_id, size_t limit) const;
@@ -281,6 +283,7 @@ private:
     STMT(set_interaction);
     STMT(set_member_roles);
     STMT(get_member_roles);
+    STMT(clr_member_roles);
     STMT(set_guild_emoji);
     STMT(get_guild_emojis);
     STMT(clr_guild_emoji);
@@ -296,6 +299,8 @@ private:
     STMT(get_emoji_roles);
     STMT(set_mention);
     STMT(get_mentions);
+    STMT(set_role_mention);
+    STMT(get_role_mentions);
     STMT(set_attachment);
     STMT(get_attachments);
     STMT(set_recipient);
@@ -307,5 +312,6 @@ private:
     STMT(get_chan_ids_parent);
     STMT(get_guild_member_ids);
     STMT(clr_role);
+    STMT(get_guild_owner);
 #undef STMT
 };
